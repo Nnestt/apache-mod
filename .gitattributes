@@ -1,0 +1,5 @@
+# Force LF line endings for scripts that run inside the VM
+*.sh text eol=lf
+*.py text eol=lf
+*.conf text eol=lf
+Vagrantfile text eol=lf

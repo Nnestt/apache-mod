@@ -181,12 +181,7 @@ This test sends a sustained flood of crash payloads while simultaneously testing
 
 **Terminal 2 — Make sure poison.py is still running** (from Test 1).
 
-**Terminal 3 — Limit Apache's worker pool** (makes DoS faster to demonstrate):
-```bash
-vagrant ssh -c "echo 'ServerLimit 1
-MaxRequestWorkers 1
-ThreadsPerChild 1' | sudo tee /etc/apache2/mods-available/mpm_event.conf && sudo systemctl restart apache2"
-```
+> The worker pool is already limited to 1 by `setup.sh` (runs during `vagrant up`), so every crash takes the entire server offline.
 
 **Terminal 3 — Reset the logs:**
 ```bash

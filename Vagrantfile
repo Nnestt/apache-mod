@@ -52,10 +52,6 @@ Vagrant.configure("2") do |config|
   end
 
   # ── Provisioning ──────────────────────────────────────────
-  config.vm.provision "file",
-    source:      "target/vhost.conf",
-    destination: "/tmp/vhost.conf"
-
   config.vm.provision "shell",
     path: "target/setup.sh",
     env:  { "VAGRANT" => "1" }

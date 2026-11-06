@@ -105,6 +105,14 @@ a2enmod proxy proxy_http proxy_html xml2enc
 info "Disabling deflate (interferes with xml2enc filter chain)..."
 a2dismod -f deflate 2>/dev/null || true
 
+# ── 4b. Limit worker pool for DoS demonstration ──────────
+info "Configuring mpm_event: 1 worker (maximises DoS impact)..."
+cat > /etc/apache2/mods-available/mpm_event.conf <<EOF
+ServerLimit          1
+MaxRequestWorkers    1
+ThreadsPerChild      1
+EOF
+
 # ── 5. Deploy vhost config ────────────────────────────────
 # Always generate the vhost inline using the detected gateway IP.
 # This ensures it works on both VirtualBox and VMware regardless
